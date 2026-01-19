@@ -1,38 +1,42 @@
-# -Hytale-Batch-Tools-for-Blockbench
-English
-A collection of high-performance plugins for Blockbench (2026+), specifically designed for mass-processing Hytale assets (.blockymodel). These tools solve common automation issues like texture embedding and memory management.
-📦 Included Plugins
-1. Hytale Turbo Exporter (hytale_turbo_exporter.js)
-Purpose: Ultra-fast batch conversion from .blockymodel to .glb.
-Turbo Mode: Disables 3D rendering during process to achieve maximum speed.
-Texture Fix: Prevents "map undefined" errors by direct memory injection of textures.
-GLB Embedding: Textures are packed directly into the binary file.
-2. Hytale Batch OBJ Exporter (hytale_batch_obj_exporter.js)
-Purpose: Batch conversion from .blockymodel to .obj + .mtl.
-Hierarchy Preservation: Keeps your source folder structure in the output directory.
-Texture Extraction: Automatically saves embedded Base64 textures as standalone .png files.
-Compatibility: Optimized for Blender, Unity, and Unreal Engine workflows.
-🛠 Installation
-Download the .js files from this repository.
-Open Blockbench.
-Go to File > Plugins...
-Click on the Load Plugin from File icon (top folder icon).
-Select the downloaded scripts.
-Русский
-Коллекция высокопроизводительных плагинов для Blockbench (актуально для 2026 года), специально разработанных для массовой обработки ассетов Hytale (.blockymodel). Эти инструменты решают типичные проблемы автоматизации, такие как вшивание текстур и управление памятью.
-📦 Состав репозитория
-1. Hytale Turbo Exporter (hytale_turbo_exporter.js)
-Назначение: Ультра-быстрая пакетная конвертация из .blockymodel в .glb.
-Турбо-режим: Отключает 3D-рендеринг во время работы для достижения максимальной скорости.
-Фикс текстур: Предотвращает ошибки "map undefined" через прямое внедрение текстур в память.
-Вшивание GLB: Текстуры упаковываются прямо в бинарный файл.
-2. Hytale Batch OBJ Exporter (hytale_batch_obj_exporter.js)
-Назначение: Пакетная конвертация из .blockymodel в формат .obj + .mtl.
-Сохранение иерархии: Полностью воссоздает структуру исходных папок в папке назначения.
-Извлечение текстур: Автоматически сохраняет вшитые Base64 текстуры как отдельные .png файлы.
-Совместимость: Оптимизировано для работы в Blender, Unity и Unreal Engine.
-🛠 Установка
-Скачайте .js файлы из этого репозитория.
-Откройте Blockbench.
-Перейдите в Файл > Плагины... (File > Plugins).
-Нажмите на иконку Загрузить плагин из файла (иконка папки в верхней части окна).
+### 🛠 Technical Specifications / Технические характеристики
+
+#### 1. Hytale Turbo GLB Exporter
+| Parameter / Параметр | Value / Значение |
+| :--- | :--- |
+| **Plugin ID** | `hytale_turbo_exporter` |
+| **Version** | 9.5.0 (Stable 2026) |
+| **Format** | `.blockymodel` ➔ `.glb` (glTF Binary) |
+| **Texture Mode** | Embedded (Base64 Injection) |
+| **Optimization** | Canvas Rendering Disabled (Turbo Mode) |
+| **Memory Management** | Automatic Project Disposal |
+
+**Features:**
+*   **English:** Fixes `map undefined` errors by forcing texture initialization in Three.js buffers before export.
+*   **Русский:** Устраняет ошибки `map undefined`, принудительно инициализируя текстуры в буферах Three.js перед экспортом.
+
+---
+
+#### 2. Hytale Batch OBJ Exporter
+| Parameter / Параметр | Value / Значение |
+| :--- | :--- |
+| **Plugin ID** | `hytale_batch_obj_exporter` |
+| **Version** | 1.6.0 (Stable 2026) |
+| **Format** | `.blockymodel` ➔ `.obj` + `.mtl` |
+| **Texture Export** | PNG Extraction (External Files) |
+| **Hierarchy** | Full Recursive Folder Preservation |
+| **Compatibility** | Blender, Unity, Unreal Engine, Cinema4D |
+
+**Features:**
+*   **English:** Automatically reconstructs complex folder structures and extracts internal Base64 textures to standalone PNGs.
+*   **Русский:** Автоматически воссоздает сложные структуры папок и извлекает внутренние Base64-текстуры в отдельные PNG-файлы.
+
+---
+
+### 🚀 Usage / Использование
+
+1. **Source Folder**: Select the root directory containing your `.blockymodel` files. The plugin will scan all subfolders.
+   *Выбор папки*: Выберите корневой каталог с вашими `.blockymodel`. Плагин просканирует все подпапки.
+2. **Output Folder**: Select where you want to save converted assets. 
+   *Папка назначения*: Выберите, куда сохранить конвертированные ассеты.
+3. **Wait for Success**: A progress bar will appear at the bottom of the Blockbench window. 
+   *Ожидание*: Индикатор прогресса появится в нижней части окна Blockbench.
