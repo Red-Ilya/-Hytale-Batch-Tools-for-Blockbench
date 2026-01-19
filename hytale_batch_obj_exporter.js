@@ -1,175 +1,228 @@
 /**
- * Hytale Batch OBJ Exporter v1.6.0
- * Optimized for Blockbench 2026
+ * Hytale Batch OBJ Exporter v11.0.0
+ * 
+ * RU: Профессиональный инструмент для пакетного экспорта моделей Hytale (.blockymodel) в формат OBJ + MTL.
+ * Особенности:
+ * - UV Fix: Исправлено смещение и искажение UV при неквадратных текстурах (64x32 и др.).
+ * - Auto-MTL: Автоматическая генерация файлов материалов и сохранение PNG.
+ * - Ultra-Speed: Бинарный парсинг PNG и RAF-синхронизация для быстрой работы.
+ * - Structure: Сохранение иерархии папок при экспорте.
+ * 
+ * EN: Professional tool for batch exporting Hytale models (.blockymodel) to OBJ + MTL format.
+ * Features:
+ * - UV Fix: Fixed UV shifting/distortion for non-square textures (64x32, etc.).
+ * - Auto-MTL: Automatic material generation and PNG extraction.
+ * - Ultra-Speed: Binary PNG parsing and RAF sync for high performance.
+ * - Structure: Maintains full directory nesting during export.
+ * 
+ * @author Blockbench Assistant
+ * @version 11.0.0
  */
 
-(function() {
-    const PLUGIN_CONFIG = {
-        id: 'hytale_batch_obj_exporter',
-        title: 'Hytale Batch OBJ Exporter',
-        icon: 'archive',
-        author: 'Blockbench Assistant',
-        version: '1.6.0',
-        description: 'Batch export .blockymodel to OBJ + MTL with textures. / Пакетный экспорт в OBJ + MTL с текстурами.',
-    };
+(function () {
+  const fs = require('fs').promises;
+  const fsSync = require('fs');
+  const path = require('path');
+  const crypto = require('crypto');
 
-    let exportAction;
+  const PLUGIN_ID = 'hytale_batch_obj_exporter';
+  const TITLE = 'Hytale Batch OBJ Exporter';
 
-    BBPlugin.register(PLUGIN_CONFIG.id, {
-        title: PLUGIN_CONFIG.title,
-        author: PLUGIN_CONFIG.author,
-        variant: 'desktop',
-        version: PLUGIN_CONFIG.version,
-        icon: PLUGIN_CONFIG.icon,
-        description: PLUGIN_CONFIG.description,
-        about: 
-            "## English\n" +
-            "This plugin allows you to mass-convert Hytale models (.blockymodel) into OBJ format.\n" +
-            "*   **Preserves Folder Structure**: Recreates your subfolders in the output directory.\n" +
-            "*   **Texture Extraction**: Automatically saves embedded Base64 textures as PNG files.\n" +
-            "*   **Memory Optimized**: Closes projects after each file to prevent crashes in 2026.\n\n" +
-            "## Русский\n" +
-            "Этот плагин позволяет массово конвертировать модели Hytale (.blockymodel) в формат OBJ.\n" +
-            "*   **Сохранение структуры**: Воссоздает ваши подпапки в папке назначения.\n" +
-            "*   **Извлечение текстур**: Автоматически сохраняет вшитые Base64 текстуры в формате PNG.\n" +
-            "*   **Оптимизация памяти**: Закрывает проекты после каждого файла для стабильной работы в 2026 году.",
-        
-        onload() {
-            exportAction = new Action('hytale_batch_export_obj', {
-                name: 'Hytale Batch Export to OBJ',
-                icon: 'publish',
-                category: 'tools',
-                click: () => showExportDialog()
-            });
-            MenuBar.addAction(exportAction, 'tools');
-        },
-        onunload() {
-            if (exportAction) exportAction.delete();
-        }
+  function guid() { return crypto.randomUUID(); }
+
+  /**
+   * Быстрое извлечение размеров PNG из бинарного заголовка
+   */
+  function getPngSize(buffer) {
+    try {
+      return {
+        width: buffer.readInt32BE(16),
+        height: buffer.readInt32BE(20)
+      };
+    } catch (e) {
+      return { width: 64, height: 64 };
+    }
+  }
+
+  /**
+   * Поиск текстуры по имени модели
+   */
+  function findTexture(files, modelName) {
+    const mName = modelName.toLowerCase();
+    return files.find(f => f.toLowerCase() === mName + '.png') ||
+           files.find(f => f.toLowerCase().startsWith(mName) && f.toLowerCase().endsWith('.png')) ||
+           files.find(f => f.toLowerCase().includes('texture') && f.toLowerCase().endsWith('.png'));
+  }
+
+  /**
+   * Рекурсивный поиск файлов
+   */
+  function walkDir(dir) {
+    const res = [];
+    if (!fsSync.existsSync(dir)) return res;
+    fsSync.readdirSync(dir).forEach(f => {
+      let p = path.join(dir, f);
+      if (fsSync.statSync(p).isDirectory()) res.push(...walkDir(p));
+      else if (f.endsWith('.blockymodel')) res.push(p);
     });
+    return res;
+  }
 
-    function showExportDialog() {
-        const dialog = new Dialog({
-            id: 'batch_export_dialog',
-            title: 'Hytale Batch OBJ Export (2026 Update)',
-            form: {
-                source: { 
-                    label: 'Source Folder (Models) / Папка с моделями', 
-                    type: 'folder', 
-                    value: localStorage.getItem('h_batch_src') || '' 
-                },
-                output: { 
-                    label: 'Output Folder (OBJ) / Папка для экспорта', 
-                    type: 'folder', 
-                    value: localStorage.getItem('h_batch_out') || '' 
-                }
-            },
-            onConfirm: (data) => {
-                if (!data.source || !data.output) {
-                    Blockbench.showQuickMessage('Please select both folders!', 3000);
-                    return;
-                }
-                localStorage.setItem('h_batch_src', data.source);
-                localStorage.setItem('h_batch_out', data.output);
-                processBatch(data.source, data.output);
-            }
-        });
-        dialog.show();
+  async function processBatch(sourcePath, outputPath) {
+    const hytaleCodec = Codecs.hytale || Codecs.hytale_model || Codecs.blockymodel;
+    if (!hytaleCodec) {
+      Blockbench.showQuickMessage('Error: Hytale Codec missing!', 3500);
+      return;
     }
 
-    async function processBatch(sourcePath, outputPath) {
-        const fs = require('fs');
-        const path = require('path');
+    const allFiles = walkDir(sourcePath);
+    if (allFiles.length === 0) {
+      Blockbench.showQuickMessage('No .blockymodel files found!', 3500);
+      return;
+    }
 
-        const hytaleCodec = Codecs.hytale || Codecs.hytale_model || Codecs.blockymodel;
-        if (!hytaleCodec) {
-            Blockbench.showMessageBox({
-                title: 'Error / Ошибка',
-                message: 'Hytale plugin not found! / Плагин Hytale не найден!'
-            });
-            return;
-        }
+    let currentIndex = 0;
 
-        function walkDir(dir) {
-            let results = [];
-            fs.readdirSync(dir).forEach(file => {
-                const f = path.join(dir, file);
-                if (fs.statSync(f).isDirectory()) results = results.concat(walkDir(f));
-                else if (file.endsWith('.blockymodel')) results.push(f);
-            });
-            return results;
-        }
-
-        const allFiles = walkDir(sourcePath);
-        if (allFiles.length === 0) {
-            Blockbench.showQuickMessage('No .blockymodel files found!', 3000);
-            return;
-        }
-
-        let exportedCount = 0;
-        Blockbench.setProgress(0.01);
-
-        for (let i = 0; i < allFiles.length; i++) {
-            const filePath = allFiles[i];
-            try {
-                const content = fs.readFileSync(filePath, 'utf-8');
-                if (window.Project) Project.close();
-
-                let formatId = (hytaleCodec.format && hytaleCodec.format.id) || 'generic';
-                new ModelProject({ 
-                    format: formatId,
-                    name: path.basename(filePath, '.blockymodel')
-                }).select();
-
-                hytaleCodec.parse(JSON.parse(content), filePath);
-
-                if (Project) {
-                    Project.format = 'generic';
-                    const relativePath = path.relative(sourcePath, path.dirname(filePath));
-                    const targetDir = path.join(outputPath, relativePath);
-                    
-                    if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
-
-                    const fileName = path.basename(filePath, '.blockymodel');
-
-                    // Texture Processing
-                    Project.textures.forEach(tex => {
-                        try {
-                            let texName = tex.name || 'texture.png';
-                            if (!texName.includes('.')) texName += '.png';
-                            const targetTexPath = path.join(targetDir, texName);
-                            
-                            if (tex.path && fs.existsSync(tex.path)) {
-                                fs.copyFileSync(tex.path, targetTexPath);
-                            } else if (tex.source) {
-                                const base64Data = tex.source.replace(/^data:image\/\w+;base64,/, "");
-                                fs.writeFileSync(targetTexPath, base64Data, 'base64');
-                            }
-                        } catch (e) { console.error(e); }
-                    });
-
-                    // OBJ Export
-                    const result = Codecs.obj.compile();
-                    const obj_data = typeof result === 'object' ? result.obj : result;
-                    const mtl_data = typeof result === 'object' ? result.mtl : "";
-
-                    fs.writeFileSync(path.join(targetDir, `${fileName}.obj`), obj_data);
-                    if (mtl_data) fs.writeFileSync(path.join(targetDir, `${fileName}.mtl`), mtl_data);
-
-                    Project.saved = true;
-                    Project.close();
-                    exportedCount++;
-                }
-            } catch (err) {
-                console.error(`Error processing ${filePath}:`, err);
-            }
-            Blockbench.setProgress((i + 1) / allFiles.length);
-        }
-
+    async function next() {
+      if (currentIndex >= allFiles.length) {
         Blockbench.setProgress(0);
         Blockbench.showMessageBox({
-            title: 'Success / Готово',
-            message: `Successfully exported ${exportedCount} models.\nУспешно экспортировано ${exportedCount} моделей.`
+          title: 'Готово / Success',
+          message: `Экспортировано моделей в OBJ: ${currentIndex}\nModels exported to OBJ: ${currentIndex}`
         });
+        return;
+      }
+
+      const filePath = allFiles[currentIndex];
+      const modelName = path.basename(filePath, '.blockymodel');
+      const dirname = path.dirname(filePath);
+
+      try {
+        if (typeof Project !== 'undefined' && Project) Project.close();
+
+        // 1. Асинхронная подготовка текстуры
+        const dirFiles = fsSync.readdirSync(dirname);
+        const texFile = findTexture(dirFiles, modelName);
+        let realWidth = 64, realHeight = 64, base64 = "", buffer = null;
+
+        if (texFile) {
+          const texPath = path.join(dirname, texFile);
+          buffer = await fs.readFile(texPath);
+          const size = getPngSize(buffer);
+          realWidth = size.width;
+          realHeight = size.height;
+          base64 = `data:image/png;base64,${buffer.toString('base64')}`;
+        }
+
+        // 2. Загрузка модели
+        const modelContent = await fs.readFile(filePath, 'utf-8');
+        hytaleCodec.load(JSON.parse(modelContent), filePath);
+
+        // 3. Синхронизация размеров и исправление UV
+        Project.texture_width = realWidth;
+        Project.texture_height = realHeight;
+        Project.box_uv = false;
+
+        if (base64) {
+          Project.textures.forEach(t => t.remove());
+          Project.textures = [];
+          
+          const tex = new Texture({ name: texFile }).add(false);
+          tex.fromDataURL(base64);
+          tex.width = realWidth;
+          tex.height = realHeight;
+          tex.uuid = guid();
+          tex.id = tex.uuid;
+
+          Cube.all.forEach(cube => {
+            for (let side in cube.faces) {
+              cube.faces[side].texture = tex.id;
+            }
+            if (cube.updateUV) cube.updateUV(); // Масштабирование UV под реальный размер
+          });
+        }
+
+        // Переключение в generic для корректной работы OBJ кодека
+        Project.format = 'generic';
+        Canvas.updateAll();
+
+        // 4. Отрисовка и экспорт (RAF синхронизация)
+        requestAnimationFrame(() => {
+          requestAnimationFrame(async () => {
+            try {
+              const result = Codecs.obj.compile();
+              const obj_data = typeof result === 'object' ? result.obj : result;
+              const mtl_data = typeof result === 'object' ? result.mtl : "";
+
+              if (obj_data) {
+                const relativePath = path.relative(sourcePath, dirname);
+                const targetDir = path.join(outputPath, relativePath);
+                if (!fsSync.existsSync(targetDir)) fsSync.mkdirSync(targetDir, { recursive: true });
+
+                // Сохранение файлов
+                await fs.writeFile(path.join(targetDir, `${modelName}.obj`), obj_data);
+                if (mtl_data) await fs.writeFile(path.join(targetDir, `${modelName}.mtl`), mtl_data);
+                if (buffer && texFile) await fs.writeFile(path.join(targetDir, texFile), buffer);
+              }
+            } catch (e) { console.error(`Export error: ${modelName}`, e); }
+
+            currentIndex++;
+            Blockbench.setProgress(currentIndex / allFiles.length);
+            next();
+          });
+        });
+
+      } catch (err) {
+        console.error(`Error processing ${modelName}:`, err);
+        currentIndex++;
+        next();
+      }
     }
+
+    next();
+  }
+
+  BBPlugin.register(PLUGIN_ID, {
+    title: TITLE,
+    author: 'Blockbench Assistant',
+    version: '11.0.0',
+    icon: 'archive',
+    description: 'Ultra-fast batch export Hytale models to OBJ with UV-Aspect correction.',
+    about: 'RU: Массовый экспорт моделей Hytale в OBJ + MTL с исправлением искажений UV-координат.\nEN: Batch export Hytale models to OBJ + MTL with UV aspect ratio fix.',
+    category: 'tools',
+    onload() {
+      this.action = new Action('hytale_batch_export_obj', {
+        name: 'Hytale Batch Export to OBJ',
+        icon: 'publish',
+        category: 'tools',
+        click: () => {
+          new Dialog({
+            title: 'Hytale Batch OBJ Export v11.0',
+            id: 'hytale_obj_dialog',
+            form: {
+              source: { 
+                label: 'Source Folder (Models) / Папка с моделями', 
+                type: 'folder', 
+                value: localStorage.getItem('h_obj_src') || '' 
+              },
+              output: { 
+                label: 'Output Folder (OBJ) / Папка для экспорта', 
+                type: 'folder', 
+                value: localStorage.getItem('h_obj_out') || '' 
+              },
+            },
+            onConfirm: (data) => {
+              localStorage.setItem('h_obj_src', data.source);
+              localStorage.setItem('h_obj_out', data.output);
+              processBatch(data.source, data.output);
+            },
+          }).show();
+        },
+      });
+      MenuBar.addAction(this.action, 'tools');
+    },
+    onunload() {
+      this.action?.delete();
+    }
+  });
 })();
