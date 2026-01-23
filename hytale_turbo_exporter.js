@@ -1,13 +1,3 @@
-/**
- * Hytale Turbo Exporter v11.3.0 (MAX SPEED)
- *
- * Оптимизации:
- * - Blob Object URL вместо Base64 (мгновенная загрузка текстур)
- * - queueMicrotask вместо RAF (минус 16мс на модель)
- * - Оптимизированные циклы обработки UV
- * - Асинхронный I/O без блокировок
- */
-
 (function () {
   const fs = require('fs').promises;
   const fsSync = require('fs');
@@ -21,10 +11,9 @@
 
   function guid() {
     if (crypto.randomUUID) return crypto.randomUUID();
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-      var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
-      return v.toString(16);
-    });
+    return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+      (c ^ crypto.randomBytes(1)[0] & 15 >> c / 4).toString(16)
+    );
   }
 
   function getPngSize(buffer) {
@@ -37,11 +26,12 @@
 
   function findTexture(files, modelName) {
     const mName = modelName.toLowerCase();
-    for (let i = 0; i < files.length; i++) {
-      const f = files[i].toLowerCase();
-      if (f === mName + '.png' || f.startsWith(mName) && f.endsWith('.png') || f.includes(mName) && f.endsWith('.png')) return files[i];
-    }
-    return files.find(f => f.toLowerCase().includes('texture') && f.toLowerCase().endsWith('.png'));
+    return (
+      files.find(f => f.toLowerCase() === mName + '.png') ||
+      files.find(f => f.toLowerCase().startsWith(mName) && f.toLowerCase().endsWith('.png')) ||
+      files.find(f => f.toLowerCase().includes(mName) && f.toLowerCase().endsWith('.png')) ||
+      files.find(f => f.toLowerCase().includes('texture') && f.toLowerCase().endsWith('.png'))
+    );
   }
 
   async function walkDir(dir) {
@@ -49,8 +39,12 @@
     const files = await fs.readdir(dir, { withFileTypes: true });
     for (const f of files) {
       const p = path.join(dir, f.name);
-      if (f.isDirectory()) res.push(...(await walkDir(p)));
-      else if (f.name.endsWith('.blockymodel')) res.push(p);
+      if (f.isDirectory()) {
+        const sub = await walkDir(p);
+        res.push(...sub);
+      } else if (f.name.endsWith('.blockymodel')) {
+        res.push(p);
+      }
     }
     return res;
   }
@@ -58,46 +52,72 @@
   function applyTextureAndOptionalUVScale(texId, ratioW, ratioH) {
     if (!Cube || !Cube.all) return;
     const needScale = (ratioW !== 1 || ratioH !== 1);
-    const cubes = Cube.all;
-    for (let i = 0; i < cubes.length; i++) {
-      const faces = cubes[i].faces;
-      for (const side in faces) {
-        const face = faces[side];
+    Cube.all.forEach(cube => {
+      if (!cube || !cube.faces) return;
+      for (const side in cube.faces) {
+        const face = cube.faces[side];
         if (!face) continue;
         face.texture = texId;
-        if (needScale && face.uv) {
-          face.uv[0] *= ratioW; face.uv[2] *= ratioW;
-          face.uv[1] *= ratioH; face.uv[3] *= ratioH;
+        if (needScale && face.uv && Array.isArray(face.uv) && face.uv.length === 4) {
+          face.uv[0] *= ratioW;
+          face.uv[2] *= ratioW;
+          face.uv[1] *= ratioH;
+          face.uv[3] *= ratioH;
         }
       }
-    }
+    });
   }
 
   const escHandler = (e) => {
     if (e.key === 'Escape' && isProcessing) {
       isProcessing = false;
-      Blockbench.showQuickMessage('Stopped (ESC)', 2000);
+      Blockbench.showQuickMessage('Остановлено (ESC)', 2500);
+      Blockbench.setProgress(0);
     }
   };
+
+  async function loadTextureFast(texFilePath, texFileName) {
+    const buffer = await fs.readFile(texFilePath);
+    const size = getPngSize(buffer);
+    return {
+      name: texFileName,
+      buffer,
+      width: size.width || 64,
+      height: size.height || 64
+    };
+  }
 
   async function processBatch(sourcePath, outputPath) {
     const hytaleCodec = Codecs.hytale || Codecs.hytale_model || Codecs.blockymodel;
     const gltfCodec = Codecs.gltf;
-    if (!hytaleCodec || !gltfCodec) return Blockbench.showQuickMessage('Codec Error!', 3000);
+    
+    if (!hytaleCodec || !gltfCodec) {
+      Blockbench.showQuickMessage('Error: Codecs not found!', 3500);
+      return;
+    }
 
     const allFiles = await walkDir(sourcePath);
-    if (!allFiles.length) return Blockbench.showQuickMessage('No models found!', 3000);
+    if (allFiles.length === 0) {
+      Blockbench.showQuickMessage('No .blockymodel files found!', 3500);
+      return;
+    }
 
     isProcessing = true;
     window.addEventListener('keydown', escHandler);
     let currentIndex = 0;
 
     async function next() {
-      if (!isProcessing || currentIndex >= allFiles.length) {
+      if (!isProcessing) {
+        window.removeEventListener('keydown', escHandler);
+        Blockbench.setProgress(0);
+        return;
+      }
+
+      if (currentIndex >= allFiles.length) {
         isProcessing = false;
         window.removeEventListener('keydown', escHandler);
         Blockbench.setProgress(0);
-        if (currentIndex >= allFiles.length) Blockbench.showMessageBox({ title: 'Done', message: `Exported: ${currentIndex}` });
+        Blockbench.showMessageBox({ title: TITLE, message: `Готово! Обработано: ${currentIndex}` });
         return;
       }
 
@@ -106,61 +126,61 @@
       const dirname = path.dirname(filePath);
 
       try {
-        if (typeof Project !== 'undefined') Project.close();
+        if (typeof Project !== 'undefined' && Project) Project.close();
 
         const dirFiles = await fs.readdir(dirname);
         const texFile = findTexture(dirFiles, modelName);
 
-        const [modelContent, texBuffer] = await Promise.all([
-          fs.readFile(filePath, 'utf-8'),
-          texFile ? fs.readFile(path.join(dirname, texFile)) : null
-        ]);
+        const modelRead = fs.readFile(filePath, 'utf-8');
+        const texRead = texFile ? loadTextureFast(path.join(dirname, texFile), texFile) : Promise.resolve(null);
+
+        const [modelContent, texData] = await Promise.all([modelRead, texRead]);
+        if (!isProcessing) return next();
 
         hytaleCodec.load(JSON.parse(modelContent), filePath);
 
-        if (texBuffer) {
-          const size = getPngSize(texBuffer);
-          Project.texture_width = size.width;
-          Project.texture_height = size.height;
+        if (texData) {
+          Project.texture_width = texData.width;
+          Project.texture_height = texData.height;
           Project.box_uv = false;
 
-          // Удаление старых текстур
-          if (Project.textures.length) Project.textures.forEach(t => t.remove());
-          Project.textures.length = 0;
+          const tex = new Texture({ name: texData.name, width: texData.width, height: texData.height }).add(false);
+          tex.id = tex.uuid = guid();
 
-          const blob = new Blob([texBuffer], { type: 'image/png' });
-          const objUrl = URL.createObjectURL(blob);
-          
-          const tex = new Texture({ name: texFile, width: size.width, height: size.height }).add(false);
-          tex.uuid = tex.id = guid();
-
-          await new Promise(resolve => {
-            tex.fromDataURL(objUrl, () => {
-              applyTextureAndOptionalUVScale(tex.id, size.width / 64, size.height / 64);
-              URL.revokeObjectURL(objUrl); // Чистим память сразу
+          await new Promise((resolve) => {
+            const dataUrl = `data:image/png;base64,${texData.buffer.toString('base64')}`;
+            tex.fromDataURL(dataUrl, () => {
+              applyTextureAndOptionalUVScale(tex.id, texData.width / 64, texData.height / 64);
               resolve();
             });
-            setTimeout(resolve, 40); // Ускоренный failsafe
+            setTimeout(resolve, 1); // Уменьшено с 80 до 1мс
           });
         }
 
-        gltfCodec.textureCache = {}; 
-        // Микротаск вместо RAF для скорости
-        await new Promise(resolve => queueMicrotask(resolve));
+        if (!isProcessing) return next();
+        gltfCodec.textureCache = {};
 
-        const result = await gltfCodec.compile({ resource_mode: 'embed', binary: true, include_animations: false });
-        
+        // Экспорт
+        let result = await gltfCodec.compile({ resource_mode: 'embed', binary: true, include_animations: false });
+
         if (result && isProcessing) {
-          const targetDir = path.join(outputPath, path.relative(sourcePath, dirname));
+          const relativePath = path.relative(sourcePath, dirname);
+          const targetDir = path.join(outputPath, relativePath);
           if (!fsSync.existsSync(targetDir)) await fs.mkdir(targetDir, { recursive: true });
           await fs.writeFile(path.join(targetDir, modelName + '.glb'), Buffer.from(result));
         }
       } catch (err) {
-        console.error(err);
+        console.error(`Error: ${modelName}`, err);
       } finally {
         currentIndex++;
-        Blockbench.setProgress(currentIndex / allFiles.length);
-        next();
+        if (currentIndex % 5 === 0) Blockbench.setProgress(currentIndex / allFiles.length);
+        
+        // Используем setImmediate-подобное поведение для отзывчивости, но без задержек
+        if (currentIndex % 10 === 0) {
+            setTimeout(next, 0);
+        } else {
+            next();
+        }
       }
     }
     next();
@@ -169,22 +189,21 @@
   BBPlugin.register(PLUGIN_ID, {
     title: TITLE,
     author: 'Blockbench Assistant',
-    version: '11.3.0',
+    version: '11.2.1',
     icon: 'speed',
-    description: 'MAX-SPEED Hytale to GLB exporter. UV fix, Blob URL, no delays.',
+    description: 'Ultra-fast Hytale to GLB exporter.',
     category: 'tools',
     onload() {
       this.action = new Action('hytale_turbo_export_action', {
-        name: 'Hytale Turbo Export (MAX SPEED)',
+        name: 'Hytale Turbo Export to GLB',
         icon: 'speed',
-        category: 'tools',
         click: () => {
           new Dialog({
-            title: 'Hytale Turbo Export v11.3.0',
+            title: TITLE,
             id: 'hytale_turbo_dialog',
             form: {
-              source: { label: 'Source (Models)', type: 'folder', value: localStorage.getItem('h_src') || '' },
-              output: { label: 'Output (GLB)', type: 'folder', value: localStorage.getItem('h_out') || '' }
+              source: { label: 'Source', type: 'folder', value: localStorage.getItem('h_src') || '' },
+              output: { label: 'Output', type: 'folder', value: localStorage.getItem('h_out') || '' }
             },
             onConfirm: (data) => {
               localStorage.setItem('h_src', data.source);
@@ -198,7 +217,6 @@
     },
     onunload() {
       isProcessing = false;
-      window.removeEventListener('keydown', escHandler);
       this.action?.delete();
     }
   });
