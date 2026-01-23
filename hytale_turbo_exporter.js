@@ -1,22 +1,11 @@
 /**
- * Hytale Turbo Exporter v11.0.0
- * 
- * RU: Профессиональный инструмент для пакетного экспорта моделей Hytale (.blockymodel) в формат GLB.
- * Особенности:
- * - Ultra-Speed: Экспорт в 10 раз быстрее за счет бинарного чтения PNG и RAF-синхронизации.
- * - UV Fix: Автоматическая коррекция разрешения текстур (предотвращает смещение UV).
- * - Anti-Bleed: Генерация уникальных UUID для каждой модели, что исключает наложение чужих текстур.
- * - Structure: Полное сохранение вложенности папок при экспорте.
- * 
- * EN: Professional tool for batch exporting Hytale models (.blockymodel) to GLB format.
- * Features:
- * - Ultra-Speed: 10x faster export using binary PNG parsing and RAF sync.
- * - UV Fix: Automatic texture resolution correction (prevents UV shifting).
- * - Anti-Bleed: Unique UUID generation for each model to prevent texture mixing.
- * - Structure: Maintains full directory nesting during export.
- * 
- * @author Blockbench Assistant
- * @version 11.0.0
+ * Hytale Turbo Exporter v11.3.0 (MAX SPEED)
+ *
+ * Оптимизации:
+ * - Blob Object URL вместо Base64 (мгновенная загрузка текстур)
+ * - queueMicrotask вместо RAF (минус 16мс на модель)
+ * - Оптимизированные циклы обработки UV
+ * - Асинхронный I/O без блокировок
  */
 
 (function () {
@@ -28,69 +17,87 @@
   const PLUGIN_ID = 'hytale_turbo_exporter';
   const TITLE = 'Hytale Turbo Exporter';
 
-  function guid() { return crypto.randomUUID(); }
+  let isProcessing = false;
 
-  /**
-   * Быстрое извлечение размеров PNG из байтового потока (без загрузки в DOM)
-   */
+  function guid() {
+    if (crypto.randomUUID) return crypto.randomUUID();
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+      var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+      return v.toString(16);
+    });
+  }
+
   function getPngSize(buffer) {
     try {
-      return {
-        width: buffer.readInt32BE(16),
-        height: buffer.readInt32BE(20)
-      };
+      return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
     } catch (e) {
       return { width: 64, height: 64 };
     }
   }
 
-  /**
-   * Умный поиск подходящей текстуры
-   */
   function findTexture(files, modelName) {
     const mName = modelName.toLowerCase();
-    return files.find(f => f.toLowerCase() === mName + '.png') ||
-           files.find(f => f.toLowerCase().startsWith(mName) && f.toLowerCase().endsWith('.png')) ||
-           files.find(f => f.toLowerCase().includes(mName) && f.toLowerCase().endsWith('.png')) ||
-           files.find(f => f.toLowerCase().includes('texture') && f.toLowerCase().endsWith('.png'));
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i].toLowerCase();
+      if (f === mName + '.png' || f.startsWith(mName) && f.endsWith('.png') || f.includes(mName) && f.endsWith('.png')) return files[i];
+    }
+    return files.find(f => f.toLowerCase().includes('texture') && f.toLowerCase().endsWith('.png'));
   }
 
-  /**
-   * Рекурсивный обход директорий
-   */
-  function walkDir(dir) {
-    const res = [];
-    if (!fsSync.existsSync(dir)) return res;
-    fsSync.readdirSync(dir).forEach(f => {
-      let p = path.join(dir, f);
-      if (fsSync.statSync(p).isDirectory()) res.push(...walkDir(p));
-      else if (f.endsWith('.blockymodel')) res.push(p);
-    });
+  async function walkDir(dir) {
+    let res = [];
+    const files = await fs.readdir(dir, { withFileTypes: true });
+    for (const f of files) {
+      const p = path.join(dir, f.name);
+      if (f.isDirectory()) res.push(...(await walkDir(p)));
+      else if (f.name.endsWith('.blockymodel')) res.push(p);
+    }
     return res;
   }
 
+  function applyTextureAndOptionalUVScale(texId, ratioW, ratioH) {
+    if (!Cube || !Cube.all) return;
+    const needScale = (ratioW !== 1 || ratioH !== 1);
+    const cubes = Cube.all;
+    for (let i = 0; i < cubes.length; i++) {
+      const faces = cubes[i].faces;
+      for (const side in faces) {
+        const face = faces[side];
+        if (!face) continue;
+        face.texture = texId;
+        if (needScale && face.uv) {
+          face.uv[0] *= ratioW; face.uv[2] *= ratioW;
+          face.uv[1] *= ratioH; face.uv[3] *= ratioH;
+        }
+      }
+    }
+  }
+
+  const escHandler = (e) => {
+    if (e.key === 'Escape' && isProcessing) {
+      isProcessing = false;
+      Blockbench.showQuickMessage('Stopped (ESC)', 2000);
+    }
+  };
+
   async function processBatch(sourcePath, outputPath) {
     const hytaleCodec = Codecs.hytale || Codecs.hytale_model || Codecs.blockymodel;
-    if (!hytaleCodec) {
-      Blockbench.showQuickMessage('Error: Hytale Codec not found!', 3500);
-      return;
-    }
+    const gltfCodec = Codecs.gltf;
+    if (!hytaleCodec || !gltfCodec) return Blockbench.showQuickMessage('Codec Error!', 3000);
 
-    const allFiles = walkDir(sourcePath);
-    if (allFiles.length === 0) {
-      Blockbench.showQuickMessage('No .blockymodel files found!', 3500);
-      return;
-    }
+    const allFiles = await walkDir(sourcePath);
+    if (!allFiles.length) return Blockbench.showQuickMessage('No models found!', 3000);
 
+    isProcessing = true;
+    window.addEventListener('keydown', escHandler);
     let currentIndex = 0;
 
     async function next() {
-      if (currentIndex >= allFiles.length) {
+      if (!isProcessing || currentIndex >= allFiles.length) {
+        isProcessing = false;
+        window.removeEventListener('keydown', escHandler);
         Blockbench.setProgress(0);
-        Blockbench.showMessageBox({
-          title: 'Экспорт завершен / Export Complete',
-          message: `Успешно обработано моделей: ${currentIndex}\nSuccessfully processed: ${currentIndex}`
-        });
+        if (currentIndex >= allFiles.length) Blockbench.showMessageBox({ title: 'Done', message: `Exported: ${currentIndex}` });
         return;
       }
 
@@ -99,127 +106,99 @@
       const dirname = path.dirname(filePath);
 
       try {
-        if (typeof Project !== 'undefined' && Project) Project.close();
+        if (typeof Project !== 'undefined') Project.close();
 
-        // Асинхронная подготовка данных
-        const dirFiles = fsSync.readdirSync(dirname);
+        const dirFiles = await fs.readdir(dirname);
         const texFile = findTexture(dirFiles, modelName);
-        
-        let realWidth = 64, realHeight = 64, base64 = "";
 
-        if (texFile) {
-          const buffer = await fs.readFile(path.join(dirname, texFile));
-          const size = getPngSize(buffer);
-          realWidth = size.width;
-          realHeight = size.height;
-          base64 = `data:image/png;base64,${buffer.toString('base64')}`;
-        }
+        const [modelContent, texBuffer] = await Promise.all([
+          fs.readFile(filePath, 'utf-8'),
+          texFile ? fs.readFile(path.join(dirname, texFile)) : null
+        ]);
 
-        // Загрузка модели
-        const modelContent = await fs.readFile(filePath, 'utf-8');
         hytaleCodec.load(JSON.parse(modelContent), filePath);
 
-        // Принудительная настройка UV и разрешения
-        Project.texture_width = realWidth;
-        Project.texture_height = realHeight;
-        Project.box_uv = false; 
+        if (texBuffer) {
+          const size = getPngSize(texBuffer);
+          Project.texture_width = size.width;
+          Project.texture_height = size.height;
+          Project.box_uv = false;
 
-        if (base64) {
-          Project.textures.forEach(t => t.remove());
-          Project.textures = [];
+          // Удаление старых текстур
+          if (Project.textures.length) Project.textures.forEach(t => t.remove());
+          Project.textures.length = 0;
 
-          const tex = new Texture({ name: texFile }).add(false);
-          tex.fromDataURL(base64);
-          tex.width = realWidth; 
-          tex.height = realHeight;
-          tex.uuid = guid(); 
-          tex.id = tex.uuid;
+          const blob = new Blob([texBuffer], { type: 'image/png' });
+          const objUrl = URL.createObjectURL(blob);
+          
+          const tex = new Texture({ name: texFile, width: size.width, height: size.height }).add(false);
+          tex.uuid = tex.id = guid();
 
-          Cube.all.forEach(cube => {
-            for (let side in cube.faces) {
-              cube.faces[side].texture = tex.id;
-            }
+          await new Promise(resolve => {
+            tex.fromDataURL(objUrl, () => {
+              applyTextureAndOptionalUVScale(tex.id, size.width / 64, size.height / 64);
+              URL.revokeObjectURL(objUrl); // Чистим память сразу
+              resolve();
+            });
+            setTimeout(resolve, 40); // Ускоренный failsafe
           });
         }
 
-        if (Codecs.gltf) Codecs.gltf.textureCache = {};
-        Canvas.updateAll();
+        gltfCodec.textureCache = {}; 
+        // Микротаск вместо RAF для скорости
+        await new Promise(resolve => queueMicrotask(resolve));
 
-        // RAF-синхронизация для моментального экспорта после рендера кадра
-        requestAnimationFrame(() => {
-          requestAnimationFrame(async () => {
-            try {
-              const result = await Codecs.gltf.compile({ 
-                resource_mode: 'embed', 
-                binary: true, 
-                include_animations: false 
-              });
-              
-              if (result) {
-                const relativePath = path.relative(sourcePath, dirname);
-                const targetDir = path.join(outputPath, relativePath);
-                if (!fsSync.existsSync(targetDir)) fsSync.mkdirSync(targetDir, { recursive: true });
-                
-                await fs.writeFile(path.join(targetDir, modelName + '.glb'), Buffer.from(result));
-              }
-            } catch (e) { console.error(`Export error on ${modelName}:`, e); }
-
-            currentIndex++;
-            Blockbench.setProgress(currentIndex / allFiles.length);
-            next();
-          });
-        });
-
+        const result = await gltfCodec.compile({ resource_mode: 'embed', binary: true, include_animations: false });
+        
+        if (result && isProcessing) {
+          const targetDir = path.join(outputPath, path.relative(sourcePath, dirname));
+          if (!fsSync.existsSync(targetDir)) await fs.mkdir(targetDir, { recursive: true });
+          await fs.writeFile(path.join(targetDir, modelName + '.glb'), Buffer.from(result));
+        }
       } catch (err) {
-        console.error(`Critical error on ${modelName}:`, err);
+        console.error(err);
+      } finally {
         currentIndex++;
+        Blockbench.setProgress(currentIndex / allFiles.length);
         next();
       }
     }
-
     next();
   }
 
   BBPlugin.register(PLUGIN_ID, {
     title: TITLE,
     author: 'Blockbench Assistant',
-    version: '11.0.0',
+    version: '11.3.0',
     icon: 'speed',
-    description: 'Ultra-fast batch export Hytale models to GLB with fixed UV and unique textures.',
-    about: 'RU: Массовый экспорт моделей Hytale в GLB. Решает проблемы с UV и кэшированием текстур.\nEN: Bulk export of Hytale models to GLB. Solves UV issues and texture caching bugs.',
+    description: 'MAX-SPEED Hytale to GLB exporter. UV fix, Blob URL, no delays.',
     category: 'tools',
     onload() {
       this.action = new Action('hytale_turbo_export_action', {
-        name: 'Hytale Turbo Export to GLB',
+        name: 'Hytale Turbo Export (MAX SPEED)',
         icon: 'speed',
         category: 'tools',
         click: () => {
           new Dialog({
-            title: 'Hytale Turbo Export v11.0',
+            title: 'Hytale Turbo Export v11.3.0',
             id: 'hytale_turbo_dialog',
             form: {
-              source: { 
-                label: 'Source Folder (Models) / Папка с моделями', 
-                type: 'folder', 
-                value: localStorage.getItem('h_src') || '' 
-              },
-              output: { 
-                label: 'Output Folder (GLB) / Папка для экспорта', 
-                type: 'folder', 
-                value: localStorage.getItem('h_out') || '' 
-              },
+              source: { label: 'Source (Models)', type: 'folder', value: localStorage.getItem('h_src') || '' },
+              output: { label: 'Output (GLB)', type: 'folder', value: localStorage.getItem('h_out') || '' }
             },
             onConfirm: (data) => {
               localStorage.setItem('h_src', data.source);
               localStorage.setItem('h_out', data.output);
               processBatch(data.source, data.output);
-            },
+            }
           }).show();
-        },
+        }
       });
       MenuBar.addAction(this.action, 'tools');
     },
     onunload() {
+      isProcessing = false;
+      window.removeEventListener('keydown', escHandler);
       this.action?.delete();
     }
   });
